@@ -224,6 +224,11 @@ capture order. If monitor placement or order verification fails, restore reports
 and keeps the records. Check Mission Control before retrying; it does not automatically
 reorder desktops that have already landed incorrectly.
 
+Each eject/restore drop is confirmed against the live Space-to-monitor mapping before
+the next drag. A failed restore insertion stops dependent drops; a failed eject append
+still permits the remaining independent appends. Ordered drops require a stable gap,
+which is rechecked after moving the pointer and immediately before releasing it.
+
 This change preserves desktop identity and ordering. Exact positions of individual
 windows, including several Chrome windows in one desktop, remain a separate limitation.
 

@@ -74,6 +74,25 @@ public enum SpaceRestoreOrder {
     }
     return CGPoint(x: min(max(x, bar.minX + 2), bar.maxX - 2), y: bar.midY)
   }
+
+  /// Follow a moving insertion gap, rechecking after every mouse move.
+  /// Exhausted or explicitly unstable readings are never safe to release at.
+  static func followInsertionGap(
+    from start: CGPoint, maxAttempts: Int = 3,
+    read: () -> (point: CGPoint, isStable: Bool)?,
+    move: (CGPoint, CGPoint) -> Void
+  ) -> CGPoint? {
+    var current = start
+    for _ in 0..<maxAttempts {
+      guard let reading = read(), reading.isStable else { return nil }
+      if abs(reading.point.x - current.x) <= 2 && abs(reading.point.y - current.y) <= 2 {
+        return current
+      }
+      move(current, reading.point)
+      current = reading.point
+    }
+    return nil
+  }
 }
 
 public enum SpaceRestoreError: Error, LocalizedError {

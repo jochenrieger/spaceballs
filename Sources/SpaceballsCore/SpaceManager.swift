@@ -3112,7 +3112,8 @@ public class SpaceManager {
   /// fresh read beats the planned index; returning nil skips the drag.
   public func moveSpacesInMCBatch(
     _ drags: [SpaceTileDrag], verbose: Bool = false,
-    resolveSourceIndex: ((_ dragIndex: Int) -> Int?)? = nil
+    resolveSourceIndex: ((_ dragIndex: Int) -> Int?)? = nil,
+    verifyDrop: ((_ dragIndex: Int) -> Bool)? = nil
   ) -> [Int] {
     guard !drags.isEmpty else { return [] }
     guard AXIsProcessTrusted() else {
@@ -3192,38 +3193,34 @@ public class SpaceManager {
         }
       }
 
-      for (dragIndex, drag) in drags.enumerated() {
-        guard let sourceDisplay = displayMatching(drag.sourceScreenNumber),
-          let sourceBar = spacesBar(of: sourceDisplay),
-          let targetDisplay = displayMatching(drag.targetScreenNumber),
-          let targetBar = spacesBar(of: targetDisplay)
-        else {
-          Self.reportMCFailure("moveSpacesInMCBatch: displays for drag \(dragIndex) not found")
-          if drag.targetSpaceIndex != nil { break }
-          continue
-        }
-        let sourceIndex: Int? =
-          resolveSourceIndex.map { $0(dragIndex) } ?? drag.sourceSpaceIndex
-        guard let sourceIndex else {
-          if verbose { print("moveSpacesInMCBatch: drag \(dragIndex) skipped") }
-          if drag.targetSpaceIndex != nil { break }
-          continue
-        }
-        if Self.performSpaceTileDrag(
-          sourceBar: sourceBar, targetBar: targetBar,
-          sourceSpaceIndex: sourceIndex, targetSpaceIndex: drag.targetSpaceIndex,
-          dropSettle: timing.dropSettle,
-          verbose: verbose)
-        {
-          completed.append(dragIndex)
-        } else if drag.targetSpaceIndex != nil {
-          // Later slots were planned assuming this insertion succeeded.
-          break
-        }
-        // Short bridge toward the next grab; the grab's own settle handles
-        // the tail of Mission Control's re-layout.
-        Thread.sleep(forTimeInterval: timing.interDragPause)
-      }
+      completed = SpaceTileBatch.run(
+        drags: drags,
+        perform: { dragIndex, drag in
+          guard let sourceDisplay = displayMatching(drag.sourceScreenNumber),
+            let sourceBar = spacesBar(of: sourceDisplay),
+            let targetDisplay = displayMatching(drag.targetScreenNumber),
+            let targetBar = spacesBar(of: targetDisplay)
+          else {
+            Self.reportMCFailure("moveSpacesInMCBatch: displays for drag \(dragIndex) not found")
+            return false
+          }
+          let sourceIndex: Int? =
+            resolveSourceIndex.map { $0(dragIndex) } ?? drag.sourceSpaceIndex
+          guard let sourceIndex else {
+            if verbose { print("moveSpacesInMCBatch: drag \(dragIndex) skipped") }
+            return false
+          }
+          return Self.performSpaceTileDrag(
+            sourceBar: sourceBar, targetBar: targetBar,
+            sourceSpaceIndex: sourceIndex, targetSpaceIndex: drag.targetSpaceIndex,
+            dropSettle: timing.dropSettle,
+            verbose: verbose)
+        }, verify: verifyDrop,
+        afterEach: {
+          // Short bridge toward the next grab; the grab's own settle handles
+          // the tail of Mission Control's re-layout.
+          Thread.sleep(forTimeInterval: timing.interDragPause)
+        })
       Self.dismissMissionControlIfPresent(dockElement: dockElement)
     }
 
@@ -3340,18 +3337,30 @@ public class SpaceManager {
     if verbose { print("  Drop target at \(arrival)") }
 
     var dropPoint = arrival
+    var lastInsertionPoint = arrival
+    let settleInsertion: (CGPoint) -> CGPoint? = { from in
+      SpaceRestoreOrder.followInsertionGap(
+        from: from,
+        read: {
+          Self.awaitStablePoint(
+            read: readInsertionTarget, delay: { Thread.sleep(forTimeInterval: 0.04) })
+        },
+        move: { old, new in
+          Self.postMouseDragToPoint(from: old, to: new, steps: 4)
+          lastInsertionPoint = new
+        })
+    }
+    let cancelInsertion: () -> Void = {
+      Self.reportMCFailure("moveSpaceInMC: destination insertion gap unstable; cancelling drag")
+      Self.postMouseDragToPoint(from: lastInsertionPoint, to: nudge, steps: 4)
+      Self.postMouseUp(at: nudge)
+    }
     if targetSpaceIndex != nil {
-      guard
-        let insertion = Self.awaitStablePoint(
-          read: readInsertionTarget, delay: { Thread.sleep(forTimeInterval: 0.04) })
-      else {
-        Self.reportMCFailure("moveSpaceInMC: destination insertion gap unreadable; cancelling drag")
-        Self.postMouseDragToPoint(from: dropPoint, to: nudge, steps: 4)
-        Self.postMouseUp(at: nudge)
+      guard let insertion = settleInsertion(dropPoint) else {
+        cancelInsertion()
         return false
       }
-      Self.postMouseDragToPoint(from: dropPoint, to: insertion.point, steps: 4)
-      dropPoint = insertion.point
+      dropPoint = insertion
     }
     if targetSpaceIndex == nil,
       let settled = Self.awaitStablePoint(
@@ -3369,6 +3378,15 @@ public class SpaceManager {
     for _ in 0..<7 {
       Self.postMouseDragEvent(at: dropPoint)
       Thread.sleep(forTimeInterval: 0.05)
+    }
+    if targetSpaceIndex != nil {
+      // The hover itself can shift tiles. Reconfirm immediately before the
+      // release, not only before the dwell or the final four-step glide.
+      guard let finalPoint = settleInsertion(dropPoint) else {
+        cancelInsertion()
+        return false
+      }
+      dropPoint = finalPoint
     }
     Self.postMouseUp(at: dropPoint)
 

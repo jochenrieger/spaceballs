@@ -215,6 +215,11 @@ Every other case simulates the drag:
   bar. Unreadable gaps cancel the drag; they must never fall back to releasing
   at the bar centre. `SpaceRestoreOrder` contains the pure planning, geometry
   and commit verification used by the runtime and regression tests.
+- `SpaceTileBatch` verifies each eject/restore drop against CGS before any
+  dependent insertion. Failed finite slots stop the batch; append slots
+  (`Int.max`) remain independent and continue after a failure. Mouse-up alone
+  is never evidence that Mission Control accepted the drop. Stable gap readings
+  are required and rechecked after gliding and immediately before release.
 - Restore verifies both display membership and saved relative order before
   consuming origins. Failure retains records and reports an error, including
   when a retry finds the desktops already on the monitor but misordered.

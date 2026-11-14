@@ -290,18 +290,30 @@ extension SpaceManager {
     // reflects drops live, that's the true post-shift position; when it
     // lags, the read returns the planned index — which the DESCENDING
     // per-display order keeps correct regardless.
-    let attemptedIndices = moveSpacesInMCBatch(drags) { dragIndex in
-      let move = dragMoves[dragIndex]
-      let spaces = self.getAllSpaces()
-      guard
-        let space = spaces.first(where: { $0.id == move.spaceID }),
-        space.displayUUID == move.sourceDisplayUUID
-      else { return nil }  // already landed elsewhere, or gone — skip
-      return
-        spaces
-        .filter { $0.type == .desktop && $0.displayUUID == move.sourceDisplayUUID }
-        .firstIndex(where: { $0.id == move.spaceID })
-    }
+    let attemptedIndices = moveSpacesInMCBatch(
+      drags,
+      resolveSourceIndex: { dragIndex in
+        let move = dragMoves[dragIndex]
+        let spaces = self.getAllSpaces()
+        guard
+          let space = spaces.first(where: { $0.id == move.spaceID }),
+          space.displayUUID == move.sourceDisplayUUID
+        else { return nil }  // already landed elsewhere, or gone — skip
+        return
+          spaces
+          .filter { $0.type == .desktop && $0.displayUUID == move.sourceDisplayUUID }
+          .firstIndex(where: { $0.id == move.spaceID })
+      },
+      verifyDrop: { dragIndex in
+        let move = dragMoves[dragIndex]
+        // Mouse-up does not prove that Mission Control accepted a drop. Wait
+        // for CGS before any later finite insertion uses the planned topology.
+        return self.poll(interval: 0.05, timeout: 2.0) {
+          self.getAllSpaces().contains {
+            $0.uuid == move.spaceUUID && $0.displayUUID == move.targetDisplayUUID
+          }
+        }
+      })
     let attempted = attemptedIndices.map { dragMoves[$0] }
 
     // The drops animate before CGS reflects the new topology — poll until
