@@ -28,6 +28,9 @@ public protocol EjectRecordStoring {
   /// the display again when macOS reassigns its UUID across a reconnect.
   func recordDisplayFingerprint(displayUUID: String, fingerprint: DisplayFingerprint)
   func displayFingerprints() -> [String: DisplayFingerprint]
+  /// Full desktop UUID order per origin display, including its staying anchor.
+  func recordDesktopOrder(displayUUID: String, spaceUUIDs: [String])
+  func desktopOrders() -> [String: [String]]
 }
 
 // MARK: - UserDefaults Implementation
@@ -47,6 +50,7 @@ public final class EjectStore: EjectRecordStoring {
   private static let legacyArmedSpacesKey = "armedEjectedSpaces"
   private static let activeSpacesKey = "ejectedActiveSpaces"
   private static let fingerprintsKey = "ejectedDisplayFingerprints"
+  private static let ordersKey = "ejectedDesktopOrders"
   private let defaults: UserDefaults
 
   public init(defaults: UserDefaults = UserDefaults(suiteName: "com.moltenbits.spaceballs.shared")!)
@@ -154,11 +158,33 @@ public final class EjectStore: EjectRecordStoring {
     defaults.dictionary(forKey: Self.fingerprintsKey) as? [String: [String: Double]] ?? [:]
   }
 
+  public func desktopOrders() -> [String: [String]] {
+    defaults.dictionary(forKey: Self.ordersKey) as? [String: [String]] ?? [:]
+  }
+
+  public func recordDesktopOrder(displayUUID: String, spaceUUIDs: [String]) {
+    var orders = desktopOrders()
+    let pending = pendingEjections()
+    // A retry after a partial eject must not forget desktops already parked
+    // on the laptop. Preserve that baseline, appending newly discovered UUIDs.
+    if let existing = orders[displayUUID],
+      existing.contains(where: {
+        !spaceUUIDs.contains($0) && pending[$0]?.contains(displayUUID) == true
+      })
+    {
+      orders[displayUUID] = existing + spaceUUIDs.filter { !existing.contains($0) }
+    } else {
+      orders[displayUUID] = spaceUUIDs
+    }
+    defaults.set(orders, forKey: Self.ordersKey)
+  }
+
   /// Drops fingerprints and arming for displays no origin references anymore.
   private func pruneUnreferenced(_ records: [String: [String]]) {
     let referenced = Set(records.values.flatMap { $0 })
     let fingerprints = rawFingerprints().filter { referenced.contains($0.key) }
     defaults.set(fingerprints, forKey: Self.fingerprintsKey)
+    defaults.set(desktopOrders().filter { referenced.contains($0.key) }, forKey: Self.ordersKey)
     let armed = armedDisplays().filter { referenced.contains($0) }
     defaults.set(Array(armed).sorted(), forKey: Self.armedDisplaysKey)
   }

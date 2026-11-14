@@ -3105,8 +3105,8 @@ public class SpaceManager {
   /// once, drag each, dismiss once. Returns the indices into `drags` of the
   /// drags that completed. Drags sharing a source display must be ordered by
   /// DESCENDING sourceSpaceIndex — completed removals then never shift the
-  /// tile indices of drags still to run. The drop aims at the target bar's
-  /// frame center, so a target bar gaining tiles never goes stale.
+  /// tile indices of drags still to run. An explicit targetSpaceIndex aims
+  /// at a live insertion gap; nil retains the manual centre-drop behavior.
   /// `resolveSourceIndex` (optional) re-derives a drag's tile index just
   /// before its grab — completed drops shift the remaining tiles, so a
   /// fresh read beats the planned index; returning nil skips the drag.
@@ -3199,20 +3199,26 @@ public class SpaceManager {
           let targetBar = spacesBar(of: targetDisplay)
         else {
           Self.reportMCFailure("moveSpacesInMCBatch: displays for drag \(dragIndex) not found")
+          if drag.targetSpaceIndex != nil { break }
           continue
         }
         let sourceIndex: Int? =
           resolveSourceIndex.map { $0(dragIndex) } ?? drag.sourceSpaceIndex
         guard let sourceIndex else {
           if verbose { print("moveSpacesInMCBatch: drag \(dragIndex) skipped") }
+          if drag.targetSpaceIndex != nil { break }
           continue
         }
         if Self.performSpaceTileDrag(
           sourceBar: sourceBar, targetBar: targetBar,
-          sourceSpaceIndex: sourceIndex, dropSettle: timing.dropSettle,
+          sourceSpaceIndex: sourceIndex, targetSpaceIndex: drag.targetSpaceIndex,
+          dropSettle: timing.dropSettle,
           verbose: verbose)
         {
           completed.append(dragIndex)
+        } else if drag.targetSpaceIndex != nil {
+          // Later slots were planned assuming this insertion succeeded.
+          break
         }
         // Short bridge toward the next grab; the grab's own settle handles
         // the tail of Mission Control's re-layout.
@@ -3230,7 +3236,7 @@ public class SpaceManager {
   /// that's the session owner's job.
   private static func performSpaceTileDrag(
     sourceBar: AXUIElement, targetBar: AXUIElement,
-    sourceSpaceIndex: Int, dropSettle: TimeInterval, verbose: Bool
+    sourceSpaceIndex: Int, targetSpaceIndex: Int?, dropSettle: TimeInterval, verbose: Bool
   ) -> Bool {
     // Locate the tile by index among the bar's desktop tiles (fullscreen
     // spaces show app-titled tiles in the same bar and don't count), then
@@ -3286,14 +3292,26 @@ public class SpaceManager {
     let nudge = CGPoint(x: grab.point.x, y: grab.point.y + 30)
     Self.postMouseDragToPoint(from: grab.point, to: nudge, steps: 3)
 
-    // Home toward the CENTER of the destination bar's frame. Tiles are laid
-    // out centered in the bar, so the frame center lands mid-row — a clean
-    // insertion point well inside the bar. Tile coordinates are NOT used for
-    // the aim: collapsed-state tiles can report frames above the bar (seen
-    // on portrait displays), and a stale read overshoots to the display's
-    // top edge where MC refuses the drop. The bar expands as the drag
-    // approaches; re-reads bend the path onto the live frame.
+    // Approach the bar centre while it is collapsed, then home into the
+    // requested insertion gap once its live tile frames are inside the bar.
+    // Never release an ordered drag at the centre as a fallback.
+    let readInsertionTarget: () -> CGPoint? = {
+      guard let slot = targetSpaceIndex,
+        let barPos = Self.axPosition(targetBar), let barSize = Self.axSize(targetBar)
+      else { return nil }
+      let targetTiles = desktopTiles(in: targetBar).filter {
+        Self.axStringAttribute($0, name: "AXTitle") != spaceTileTitle
+      }
+      let frames = targetTiles.compactMap { tile -> CGRect? in
+        guard let position = Self.axPosition(tile), let size = Self.axSize(tile) else { return nil }
+        return CGRect(origin: position, size: size)
+      }
+      guard frames.count == targetTiles.count else { return nil }
+      return SpaceRestoreOrder.dropPoint(
+        bar: CGRect(origin: barPos, size: barSize), tiles: frames, insertionIndex: slot)
+    }
     let readDropTarget: () -> CGPoint? = {
+      if let insertion = readInsertionTarget() { return insertion }
       guard let barPos = Self.axPosition(targetBar), let barSize = Self.axSize(targetBar)
       else { return nil }
       return CGPoint(x: barPos.x + barSize.width / 2, y: barPos.y + barSize.height / 2)
@@ -3322,8 +3340,22 @@ public class SpaceManager {
     if verbose { print("  Drop target at \(arrival)") }
 
     var dropPoint = arrival
-    if let settled = Self.awaitStablePoint(
-      read: readDropTarget, delay: { Thread.sleep(forTimeInterval: 0.04) }),
+    if targetSpaceIndex != nil {
+      guard
+        let insertion = Self.awaitStablePoint(
+          read: readInsertionTarget, delay: { Thread.sleep(forTimeInterval: 0.04) })
+      else {
+        Self.reportMCFailure("moveSpaceInMC: destination insertion gap unreadable; cancelling drag")
+        Self.postMouseDragToPoint(from: dropPoint, to: nudge, steps: 4)
+        Self.postMouseUp(at: nudge)
+        return false
+      }
+      Self.postMouseDragToPoint(from: dropPoint, to: insertion.point, steps: 4)
+      dropPoint = insertion.point
+    }
+    if targetSpaceIndex == nil,
+      let settled = Self.awaitStablePoint(
+        read: readDropTarget, delay: { Thread.sleep(forTimeInterval: 0.04) }),
       abs(settled.point.x - dropPoint.x) > 2 || abs(settled.point.y - dropPoint.y) > 2
     {
       Self.postMouseDragToPoint(from: dropPoint, to: settled.point, steps: 4)

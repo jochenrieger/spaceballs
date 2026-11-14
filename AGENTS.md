@@ -202,6 +202,26 @@ Every other case simulates the drag:
 
 ## Known Limitations
 
+### Ordered eject and restore on the macOS 26 branch
+
+- Fresh ejects save each origin display's desktop UUID order in the shared
+  `ejectedDesktopOrders` preference. Orders for other sites survive until their
+  corresponding eject records are consumed.
+- Eject appends parked desktops after the laptop's own desktops. Restore plans
+  explicit insertion slots from saved neighbors while retaining descending
+  source-index order. Manual `move-space` still uses the centre-drop behavior
+  described above.
+- Ordered drops require readable expanded tile frames inside the destination
+  bar. Unreadable gaps cancel the drag; they must never fall back to releasing
+  at the bar centre. `SpaceRestoreOrder` contains the pure planning, geometry
+  and commit verification used by the runtime and regression tests.
+- Restore verifies both display membership and saved relative order before
+  consuming origins. Failure retains records and reports an error, including
+  when a retry finds the desktops already on the monitor but misordered.
+  It does not automatically repair a misordered completed drop.
+- Old eject records without saved order retain their legacy path. A new eject
+  captures order. Individual window-frame restoration is unchanged.
+
 ### Space Names Cannot Be Read or Set via API
 
 macOS does not store human-readable names for Spaces. The "Desktop 1", "Desktop 2" labels in Mission Control are generated at runtime by the Dock based on ordinal position — they are not persisted anywhere.

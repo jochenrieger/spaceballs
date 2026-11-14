@@ -29,14 +29,16 @@ public struct SpaceTileDrag {
   public let sourceSpaceIndex: Int
   public let sourceScreenNumber: CGDirectDisplayID
   public let targetScreenNumber: CGDirectDisplayID
+  public let targetSpaceIndex: Int?
 
   public init(
     sourceSpaceIndex: Int, sourceScreenNumber: CGDirectDisplayID,
-    targetScreenNumber: CGDirectDisplayID
+    targetScreenNumber: CGDirectDisplayID, targetSpaceIndex: Int? = nil
   ) {
     self.sourceSpaceIndex = sourceSpaceIndex
     self.sourceScreenNumber = sourceScreenNumber
     self.targetScreenNumber = targetScreenNumber
+    self.targetSpaceIndex = targetSpaceIndex
   }
 }
 
@@ -103,7 +105,18 @@ extension SpaceManager {
       ejectStore.recordActiveSpace(displayUUID: displayUUID, spaceUUID: spaceUUID)
     }
 
-    let verified = executePlannedMoves(preSwitches: plan.preSwitches, moves: plan.moves)
+    let desktopOrders = Dictionary(
+      uniqueKeysWithValues: EjectPlanner.desktopsByDisplay(getAllSpaces()).map {
+        ($0.0, $0.1.map(\.uuid))
+      })
+    // Append parked desktops after the laptop's own desktops. A centre drop
+    // can interleave them with the user's personal Spaces.
+    let appendMoves = plan.moves.map { move in
+      var move = move
+      move.targetIndex = Int.max
+      return move
+    }
+    let verified = executePlannedMoves(preSwitches: plan.preSwitches, moves: appendMoves)
     // A space keeps one origin per site. This eject supersedes only the
     // space's origins whose display is connected right now (it plainly
     // isn't ejected from there anymore); origins whose display is absent say
@@ -128,6 +141,9 @@ extension SpaceManager {
     // Fingerprint each home display so restore can find it again even if
     // macOS hands it a different UUID on reconnect.
     for displayUUID in Set(verified.map(\.sourceDisplayUUID)) {
+      if let order = desktopOrders[displayUUID] {
+        ejectStore.recordDesktopOrder(displayUUID: displayUUID, spaceUUIDs: order)
+      }
       if let fingerprint = Self.captureDisplayFingerprint(displayUUID: displayUUID) {
         ejectStore.recordDisplayFingerprint(displayUUID: displayUUID, fingerprint: fingerprint)
       }
@@ -168,21 +184,30 @@ extension SpaceManager {
         "restore remap: recorded display \(recorded) matched by hardware fingerprint to \(resolved)"
       )
     }
-    for record in plan.stale + plan.completed {
-      ejectStore.clearEjection(spaceUUID: record.spaceUUID, displayUUID: record.displayUUID)
-    }
-
-    let restored = executePlannedMoves(preSwitches: plan.preSwitches, moves: plan.moves)
-    for move in restored {
-      // Consume only the origin this move satisfied; the space's origins at
-      // other sites stay on record for when those displays come back.
-      guard let origin = plan.restoredOrigins[move.spaceUUID] else { continue }
-      ejectStore.clearEjection(spaceUUID: move.spaceUUID, displayUUID: origin)
-    }
-
+    _ = executePlannedMoves(preSwitches: plan.preSwitches, moves: plan.moves)
     reactivateRecordedActiveSpaces(ejectStore: ejectStore, displayRemap: plan.displayRemap)
 
-    let summary = SpaceRestoreSummary(restored: restored.map(\.spaceUUID), waiting: plan.waiting)
+    // A drop on the right monitor is not enough: verify saved desktop order
+    // as well, and retain all origins on partial failure for a later retry.
+    _ = poll(timeout: 2.0) {
+      let spaces = self.getAllSpaces()
+      return plan.moves.allSatisfy { move in
+        spaces.contains { $0.uuid == move.spaceUUID && $0.displayUUID == move.targetDisplayUUID }
+      }
+        && SpaceRestoreOrder.mismatchedDisplays(
+          spaces: spaces, recordedOrders: plan.desktopOrders
+        ).isEmpty
+    }
+    let restored: [String]
+    do {
+      restored = try SpaceRestoreOrder.completeRestore(
+        plan: plan, spaces: getAllSpaces(), store: ejectStore)
+    } catch {
+      Diagnostics.endTiming(token, outcome: "verification-failed records-retained")
+      throw error
+    }
+
+    let summary = SpaceRestoreSummary(restored: restored, waiting: plan.waiting)
     Diagnostics.endTiming(
       token, outcome: "restored=\(summary.restored.count) waiting=\(summary.waiting.count)")
     return summary
@@ -204,7 +229,7 @@ extension SpaceManager {
       spaces: spaces, pending: pending,
       recordedFingerprints: ejectStore.displayFingerprints(),
       connectedFingerprints: Self.connectedFingerprints(for: spaces),
-      parkedDisplayUUID: Self.builtinDisplayUUID())
+      parkedDisplayUUID: Self.builtinDisplayUUID(), recordedOrders: ejectStore.desktopOrders())
   }
 
   /// Pre-switches displays off the spaces about to move, runs the batch of
@@ -255,7 +280,8 @@ extension SpaceManager {
       drags.append(
         SpaceTileDrag(
           sourceSpaceIndex: move.sourceIndex,
-          sourceScreenNumber: sourceScreen, targetScreenNumber: targetScreen))
+          sourceScreenNumber: sourceScreen, targetScreenNumber: targetScreen,
+          targetSpaceIndex: move.targetIndex))
       dragMoves.append(move)
     }
 

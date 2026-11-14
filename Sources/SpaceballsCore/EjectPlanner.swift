@@ -28,6 +28,9 @@ public enum EjectPlanner {
     /// Index among the source display's desktop spaces (0-based tile index).
     public let sourceIndex: Int
     public let targetDisplayUUID: String
+    /// Insertion slot among target desktops, after removing the source tile.
+    /// nil keeps the legacy centre drop; Int.max explicitly appends.
+    public var targetIndex: Int? = nil
   }
 
   public struct Plan: Equatable {
@@ -149,6 +152,8 @@ public enum RestorePlanner {
     /// UUID by hardware fingerprint — macOS reassigned the display's UUID
     /// across the reconnect (recorded UUID → connected UUID).
     public let displayRemap: [String: String]
+    /// Saved order keyed by the currently resolved destination display UUID.
+    public var desktopOrders: [String: [String]] = [:]
 
     public var isEmpty: Bool {
       moves.isEmpty && completed.isEmpty && stale.isEmpty && waiting.isEmpty
@@ -179,7 +184,8 @@ public enum RestorePlanner {
     spaces: [SpaceInfo], pending: [String: [String]],
     recordedFingerprints: [String: DisplayFingerprint] = [:],
     connectedFingerprints: [String: DisplayFingerprint] = [:],
-    parkedDisplayUUID: String? = nil
+    parkedDisplayUUID: String? = nil,
+    recordedOrders: [String: [String]] = [:]
   ) -> Plan {
     let resolver = DisplayResolver(
       connectedDisplays: Set(spaces.map(\.displayUUID)),
@@ -194,6 +200,7 @@ public enum RestorePlanner {
     var completed: [EjectRecord] = []
     var stale: [EjectRecord] = []
     var waiting: [String] = []
+    var desktopOrders: [String: [String]] = [:]
     for (spaceUUID, origins) in pending {
       // Most recent origin first: when several sites' displays are connected
       // at once, the latest eject describes where the space belongs.
@@ -216,6 +223,9 @@ public enum RestorePlanner {
       guard let space else {
         stale.append(record)
         continue
+      }
+      if let order = recordedOrders[connectedOrigin.recorded] {
+        desktopOrders[connectedOrigin.resolved] = order
       }
       if space.displayUUID == connectedOrigin.resolved {
         completed.append(record)
@@ -254,10 +264,29 @@ public enum RestorePlanner {
     let byRecord = { (a: EjectRecord, b: EjectRecord) in
       (a.spaceUUID, a.displayUUID) < (b.spaceUUID, b.displayUUID)
     }
-    return Plan(
+    // Simulate insertions in execution order. Source removals still run in
+    // descending order, while each destination slot follows its saved UUIDs.
+    var targetDesktops = Dictionary(
+      uniqueKeysWithValues: EjectPlanner.desktopsByDisplay(spaces).map {
+        ($0.0, $0.1.map(\.uuid))
+      })
+    for index in moves.indices {
+      let move = moves[index]
+      targetDesktops[move.sourceDisplayUUID]?.removeAll { $0 == move.spaceUUID }
+      guard let order = desktopOrders[move.targetDisplayUUID] else { continue }
+      var target = targetDesktops[move.targetDisplayUUID] ?? []
+      let slot = SpaceRestoreOrder.insertionIndex(
+        spaceUUID: move.spaceUUID, recordedOrder: order, currentOrder: target)
+      moves[index].targetIndex = slot
+      target.insert(move.spaceUUID, at: slot)
+      targetDesktops[move.targetDisplayUUID] = target
+    }
+    var plan = Plan(
       preSwitches: preSwitches, moves: moves,
       completed: completed.sorted(by: byRecord), stale: stale.sorted(by: byRecord),
       waiting: waiting.sorted(), restoredOrigins: restoredOrigins,
       displayRemap: displayRemap)
+    plan.desktopOrders = desktopOrders
+    return plan
   }
 }

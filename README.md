@@ -216,6 +216,17 @@ triggered by hand at any time with **Cmd+Shift+E** or `spaceballs restore`.
 Auto-restore only fires for displays that actually went away and came back — ejecting and then continuing to
 work with everything still plugged in won't be undone by a display going to sleep.
 
+Eject now records each monitor's desktop order, including its staying Default Space.
+Returning desktops use explicit insertion slots, preserving that order separately at home
+and at the office. Parked desktops are appended after the laptop's own desktops.
+Existing eject records without saved order use the legacy restore path; eject again to
+capture order. If monitor placement or order verification fails, restore reports an error
+and keeps the records. Check Mission Control before retrying; it does not automatically
+reorder desktops that have already landed incorrectly.
+
+This change preserves desktop identity and ordering. Exact positions of individual
+windows, including several Chrome windows in one desktop, remain a separate limitation.
+
 While an eject or restore runs, a full-screen overlay appears and physical mouse input is paused (Spaceballs
 is driving the cursor); input returns as soon as the completion message appears, and the pause times out on
 its own if anything goes wrong. Pacing is adjustable in **Settings → Timing** — if a Space snaps back to its
